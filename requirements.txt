@@ -1,0 +1,8 @@
+streamlit
+pandas
+numpy
+scikit-learn
+matplotlib
+joblib
+xlrd==2.0.1
+openpyxl
