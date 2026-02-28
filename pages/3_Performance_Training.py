@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+import os, json
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
@@ -24,9 +25,6 @@ MODELS_DIR = "models"
 
 
 def find_table_path(filename: str = TABLE_FILENAME) -> Path:
-    """
-    Cherche le fichier Excel de mortalité de manière PORTABLE (sans chemin Mac absolu).
-    """
     here = Path(__file__).resolve().parent
     candidates = [
         Path.cwd() / filename,
@@ -45,44 +43,46 @@ def find_table_path(filename: str = TABLE_FILENAME) -> Path:
 
 
 @st.cache_resource
-def load_qx():
+def load_px():
     table_path = find_table_path(TABLE_FILENAME)
     if not table_path.exists():
         raise FileNotFoundError(
-            "Fichier table mortalité introuvable (TGF05-TGH05.xls). "
-            "Place-le à la racine du projet ou dans un dossier `data/`."
+            "Fichier `TGF05-TGH05.xls` introuvable. "
+            "Mets-le à la racine du projet ou dans `data/`."
         )
-    lx = load_tgf05_lx(str(table_path), "TGF05")
+    lx = load_tgf05_lx(str(table_path), sheet_name="TGF05")
     qx = build_qx_from_lx(lx)
-    gen_min, gen_max = int(min(lx.columns)), int(max(lx.columns))
-    return qx, gen_min, gen_max, str(table_path)
+    px_df = (1.0 - qx).clip(0.0, 1.0)
+    gen_min, gen_max = int(min(px_df.columns)), int(max(px_df.columns))
+    return px_df, gen_min, gen_max, str(table_path)
+
+
+def rmse(y_true, y_pred) -> float:
+    return float((mean_squared_error(y_true, y_pred) ** 0.5))
 
 
 st.set_page_config(page_title="Performance & Training", layout="wide")
 st.title("Performance & Training — Dataset, entraînement, diagnostics")
 
-# ------------------------
-# Load mortality
-# ------------------------
+# ---- Load px_df ----
 try:
-    qx, GEN_MIN, GEN_MAX, table_path_used = load_qx()
+    px_df, GEN_MIN, GEN_MAX, table_used = load_px()
 except Exception as e:
     st.error(str(e))
     st.stop()
 
-with st.expander("Infos chargement", expanded=False):
-    st.write(f"Table mortalité utilisée : `{table_path_used}`")
+with st.expander("Infos table mortalité", expanded=False):
+    st.write(f"Fichier utilisé : `{table_used}`")
     st.write(f"Générations disponibles : [{GEN_MIN}, {GEN_MAX}]")
     st.write(f"Dataset : `{DATA_PATH}` — Modèles : `{MODELS_DIR}/`")
 
 st.markdown(
     """
-Objectif : documenter une **méthodologie de validation** (pas seulement un R²).
-On affiche :
-- métriques (MAE, RMSE, R²),
-- **scatter attendu vs prédit**,
+Cette page documente l’évaluation ML au-delà d’un simple $R^2$ :
+- métriques (MAE, RMSE, $R^2$),
+- graphiques attendu vs estimé,
 - résidus,
-- learning curves (avec prudence),
+- learning curves,
 - importance des variables (permutation importance).
 """
 )
@@ -101,7 +101,8 @@ with colC:
     regenerate = st.checkbox("Régénérer le dataset (écrase dataset.csv)", value=False)
 
 if regenerate:
-    df = generate_dataset(qx=qx, n_samples=int(N), seed=int(seed), gen_min=GEN_MIN, gen_max=GEN_MAX)
+    # IMPORTANT: ton projet utilise px_df (pas qx)
+    df = generate_dataset(px_df=px_df, n_samples=int(N), seed=int(seed), gen_min=GEN_MIN, gen_max=GEN_MAX)
     save_dataset(df, DATA_PATH)
     st.success(f"Dataset régénéré et sauvegardé dans `{DATA_PATH}`")
 else:
@@ -118,12 +119,11 @@ st.dataframe(df.head(20), width="stretch")
 # Quick constraint checks
 # ------------------------
 st.markdown("**Contrôles rapides (contraintes & cohérence)** :")
-
-checks = {
-    "m <= m_prime": float((df["m"] <= df["m_prime"]).mean()) if "m" in df and "m_prime" in df else None,
-    "t <= m_prime + n": float((df["t"] <= (df["m_prime"] + df["n"])).mean()) if all(k in df for k in ["t", "m_prime", "n"]) else None,
-    "x + m_prime + n <= 120": float((df["x"] + df["m_prime"] + df["n"] <= 120).mean()) if all(k in df for k in ["x", "m_prime", "n"]) else None,
-}
+checks = {}
+if all(c in df.columns for c in ["m", "m_prime"]):
+    checks["m <= m_prime"] = float((df["m"] <= df["m_prime"]).mean())
+if all(c in df.columns for c in ["t", "m_prime", "n"]):
+    checks["t <= m_prime + n"] = float((df["t"] <= (df["m_prime"] + df["n"])).mean())
 st.dataframe(pd.DataFrame([checks]), width="stretch")
 
 # ------------------------
@@ -141,9 +141,6 @@ else:
 # ------------------------
 # Load metrics if available
 # ------------------------
-import os
-import json
-
 metrics_path = os.path.join(MODELS_DIR, "metrics.json")
 if os.path.exists(metrics_path):
     with open(metrics_path, "r") as f:
@@ -166,25 +163,18 @@ X = df[FEATURES].copy()
 y = df[target].copy()
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=int(seed))
-
 model = HistGradientBoostingRegressor(random_state=int(seed))
 model.fit(X_train, y_train)
 pred = model.predict(X_test)
 
-diag = pd.DataFrame({"y_true": y_test.values, "y_pred": pred})
-diag["residual"] = diag["y_pred"] - diag["y_true"]
-diag["abs_err"] = diag["residual"].abs()
-
-# ---- METRICS (FIX sklearn: no squared=False) ----
 c1, c2, c3 = st.columns(3)
 c1.metric("MAE", f"{mean_absolute_error(y_test, pred):.6f}")
-
-rmse = (mean_squared_error(y_test, pred) ** 0.5)
-c2.metric("RMSE", f"{rmse:.6f}")
-
+c2.metric("RMSE", f"{rmse(y_test, pred):.6f}")
 c3.metric("R²", f"{r2_score(y_test, pred):.4f}")
 
-# Scatter plot
+diag = pd.DataFrame({"y_true": y_test.values, "y_pred": pred})
+diag["residual"] = diag["y_pred"] - diag["y_true"]
+
 fig1 = plt.figure()
 plt.scatter(diag["y_true"], diag["y_pred"], s=8)
 plt.xlabel("Attendu (actuariel)")
@@ -193,7 +183,6 @@ plt.title(f"Attendu vs prédit — {target}")
 plt.grid(True)
 st.pyplot(fig1)
 
-# Residuals plot
 fig2 = plt.figure()
 plt.scatter(diag["y_true"], diag["residual"], s=8)
 plt.axhline(0)
@@ -203,20 +192,16 @@ plt.title(f"Résidus — {target}")
 plt.grid(True)
 st.pyplot(fig2)
 
-with st.expander("Table diagnostics (échantillon)", expanded=False):
-    st.dataframe(diag.sample(n=min(200, len(diag)), random_state=int(seed)), width="stretch")
-
 # ------------------------
 # Learning curves
 # ------------------------
-st.subheader("4) Learning curves (prudence)")
+st.subheader("4) Learning curves")
 
 sizes = st.multiselect(
     "Tailles d'échantillon (N)",
     options=[200, 500, 1000, 2000, 5000, 10000, 20000, 50000],
     default=[500, 1000, 2000, 5000, 10000],
 )
-
 if sizes:
     lc = learning_curve_hgb(df, target=target, sizes=sorted(sizes), seed=int(seed))
     st.dataframe(lc, width="stretch")
@@ -228,10 +213,8 @@ if sizes:
     plt.title(f"Learning curve — {target}")
     plt.grid(True)
     st.pyplot(fig3)
-
-    st.caption("Attention : avec peu de points, on décrit une tendance, sans conclure à une convergence ferme.")
 else:
-    st.info("Sélectionne au moins une taille pour afficher la learning curve.")
+    st.info("Sélectionne au moins une taille.")
 
 # ------------------------
 # Permutation importance

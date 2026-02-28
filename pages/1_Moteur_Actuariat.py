@@ -47,7 +47,7 @@ st.markdown(
 Cette page calcule :
 - **Prime unique** (π₁)
 - **Prime annuelle nivelée** (P, payée en début d’année)
-- **Réserve prospective** \(V_t\)
+- - **Réserve prospective** $V_t$
 
 Contrainte produit retenue : **m ≤ m′** (à justifier dans le rapport).
 """

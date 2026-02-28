@@ -1,8 +1,8 @@
-streamlit
-pandas
-numpy
-scikit-learn
-matplotlib
-joblib
-xlrd==2.0.1
-openpyxl
+streamlit>=1.30
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.0
+matplotlib>=3.7
+openpyxl>=3.1
+xlrd>=2.0
+joblib>=1.3
